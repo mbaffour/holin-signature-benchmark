@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "holin-signature-benchmark"
+version = "0.1.0"
+description = "Benchmarking universal, topology-specific, and context-aware signatures for bacteriophage holin prediction"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "holin-signature-benchmark contributors" }]
+keywords = ["bacteriophage", "holin", "HMMER", "bioinformatics", "lysis", "benchmark"]
+
+# NOTE: the bioinformatics backends (pyhmmer, pyfamsa, pytrimal, pyswrd, pyopal,
+# logomaker) are optional at install time. The pipeline degrades gracefully and
+# imports results from TSV/FASTA when a backend is absent. Install them via
+# environment.yml for the full feature set, or `pip install -e .[full]`.
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "scikit-learn",
+    "matplotlib",
+    "biopython",
+    "pyyaml",
+    "requests",
+    "click",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+full = [
+    "pyhmmer",
+    "pyfamsa",
+    "pytrimal",
+    "pyswrd",
+    "pyopal",
+    "logomaker",
+    "seaborn",
+]
+dev = [
+    "pytest",
+    "pytest-cov",
+]
+
+[project.scripts]
+holinbench = "holinbench.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.setuptools.package-data]
+holinbench = ["py.typed"]

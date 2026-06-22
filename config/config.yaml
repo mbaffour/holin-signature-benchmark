@@ -1,0 +1,242 @@
+# =============================================================================
+# holin-signature-benchmark — master configuration
+# =============================================================================
+# Every threshold, weight, and path the pipeline uses lives here. Scoring is
+# deliberately NOT hardcoded: edit the `scoring` block to re-weight evidence.
+#
+# Paths are resolved relative to this file's parent's parent (the repo root)
+# unless absolute. See holinbench/config.py.
+# =============================================================================
+
+project:
+  name: holin-signature-benchmark
+  random_seed: 1729
+
+# ------------------------------------------------------------------ paths ----
+paths:
+  output_dir: results
+  # Input datasets (Stage 1 reads these).
+  gold_holins: data/example/gold_holins.csv
+  weak_holins: data/example/weak_annotated_holins.csv
+  hard_negatives: data/example/hard_negatives.csv
+  proteins_faa: data/example/proteins.faa          # unknown candidates to scan
+  context_tsv: data/example/context.tsv            # genomic neighborhood
+  topology_tsv: data/example/topology_predictions.tsv
+  lysis_terms: data/example/lysis_context_terms.txt
+
+# ----------------------------------------------- sequence validation (S1) ----
+validation:
+  min_length: 30          # flag (not necessarily drop) proteins shorter than this
+  max_length: 300         # flag proteins longer than this
+  hard_min_length: 10     # drop proteins shorter than this (clearly invalid)
+  max_ambiguous_fraction: 0.10   # drop if >10% of residues are X/B/Z/J/U/O ambiguous
+  allowed_alphabet: "ACDEFGHIKLMNPQRSTVWY"
+  drop_invalid: true
+  drop_exact_duplicates: true
+
+# ----------------------------------------------------- clustering (S2) -------
+clustering:
+  identity_thresholds: [0.90, 0.70, 0.50, 0.30]
+  primary_threshold: 0.30      # threshold used to define "families" for holdout
+  coverage: 0.50               # min alignment coverage for a clustering edge
+  backend: auto                # auto | mmseqs2 | cdhit | builtin
+  word_size: 3                 # k-mer size for the builtin greedy clusterer
+
+# ----------------------------------------------------- alignment (S3) --------
+alignment:
+  backend: auto                # auto | pyfamsa | mafft | clustalo | import
+  min_seqs_per_msa: 3          # smallest group we will align / build an HMM from
+  trim: false                  # apply pytrimal automatic gap trimming
+  import_dir: null             # if backend=import, read *.afa MSAs from here
+
+# ----------------------------------------------------- HMMER (S4 / S5) -------
+hmmer:
+  backend: auto                # auto | pyhmmer | cli | import
+  # Models to build. Family/cluster HMMs are built automatically from clusters
+  # at `family_threshold` that have >= min_seqs_per_msa members.
+  build_universal: true
+  build_topology: true
+  build_family: true
+  # ASCII .hmm serialization deadlocks on some pyhmmer/Windows builds; a binary
+  # .h3m is always written, and a pressed combined DB via hmmpress. Enable this
+  # only on platforms where text serialization is known to work (e.g. Linux).
+  write_text_hmm: false
+  family_threshold: 0.30       # which clustering level defines families
+  # Scan thresholds.
+  evalue_cutoff: 0.01
+  bitscore_cutoff: null        # null = use E-value only
+  import_domtbl: null          # if backend=import, read a domtblout TSV from here
+
+# ----------------------------------------------- topology / features (S6) ----
+features:
+  kyte_doolittle_window: 19    # window for hydrophobicity-based TMD estimate
+  tmd_hydrophobicity_threshold: 1.6
+  terminal_window: 30          # N30 / C30 charge-distribution window
+  sar_max_charge_nterm: 1      # SAR-like: weakly charged N-terminus
+  topology_source: import      # import | builtin
+  # When topology_source=import, topology_predictions.tsv supplies tmd_count etc.
+  # The builtin estimator is a crude Kyte-Doolittle fallback, clearly flagged.
+
+# ------------------------------------------------ genomic context (S7) -------
+context:
+  window_genes: 5              # +/- N genes
+  window_bp: 5000              # +/- N bp
+  # Additive context scoring (see PROJECT_SPEC Stage 7). Tunable.
+  weights:
+    near_endolysin_within_3genes: 2.0
+    same_strand_as_endolysin: 1.0
+    near_spanin_or_rz: 1.0
+    near_sar_with_pinholin_topology: 1.0
+    no_better_holin_candidate: 1.0
+    has_alternative_annotation: -2.0
+    not_near_any_lysis_gene: -1.0
+    too_large_or_multidomain: -1.0
+  endolysin_near_genes: 3      # "near" endolysin = within this many genes
+
+# ----------------------------------------- candidate scoring (S8) ------------
+# Composite holin_candidate_score = hmm_score + architecture_score + context_score
+# Each sub-score is normalized to roughly 0..1 then weighted. Penalties are
+# negative. Everything here is editable; nothing is hardcoded in the modules.
+scoring:
+  weights:
+    hmm: 0.45
+    architecture: 0.30
+    context: 0.25
+  hmm:
+    family_hit_strong: 1.0     # value when a strong family HMM hit exists
+    family_hit_weak: 0.6
+    topology_hit: 0.5
+    universal_hit: 0.4
+    strong_bitscore: 30.0      # bitscore at/above this counts as "strong"
+    weak_bitscore: 12.0        # bitscore at/above this counts as "weak"
+  architecture:
+    preferred_length: [50, 150]
+    acceptable_length: [30, 200]
+    preferred_tmd: [1, 4]
+    min_hydrophobic_fraction: 0.40
+    length_in_preferred: 1.0
+    length_in_acceptable: 0.5
+    length_out: 0.0
+    tmd_in_range: 1.0
+    tmd_out_of_range: 0.0
+    hydrophobic_ok: 1.0
+    has_enzymatic_or_structural_domain: -1.0   # penalty
+    no_tmd: -1.0
+  # Confidence-category cut points on final_holin_score (0..1).
+  confidence_bins:
+    high_confidence_candidate: 0.70
+    medium_confidence_candidate: 0.50
+    weak_candidate: 0.30
+    # below weak_candidate -> unlikely_holin
+
+# ----------------------------------------------------- benchmarking (S9) -----
+benchmark:
+  models: [universal, topology, family, architecture, context, hmm_arch, hmm_arch_context]
+  validation:
+    do_random_split: true       # labeled NAIVE / potentially inflated
+    do_cluster_split: true
+    do_leave_one_family_out: true
+    do_leave_one_topology_out: true
+    cluster_split_threshold: 0.30
+    test_fraction: 0.30
+    min_class_size_warn: 5      # warn when a class has fewer members than this
+  bootstrap:
+    enabled: true
+    n_resamples: 1000
+    ci: 0.95
+
+# ----------------------------------------------------- motif analysis (S10) --
+motif:
+  entropy_conserved_bits: 1.0   # column considered "conserved" above this info content
+  max_gap_fraction: 0.50        # ignore columns with more gaps than this
+  make_logos: true
+
+# ----------------------------------------------------- synteny (S11) ---------
+synteny:
+  flank_genes: 5
+  formats: [png, svg]
+  max_maps: 10                  # cap number of per-candidate maps
+
+# ----------------------------------------------------- plotting --------------
+plotting:
+  dpi: 150
+  formats: [png]
+  style: default                # matplotlib style; "default" avoids hard deps
+  palette_by_category:
+    gold: "#1b7837"
+    weak: "#7fbf7b"
+    hard_negative: "#b2182b"
+    unknown: "#999999"
+
+# =============================================================================
+# Stage 0 — literature mining
+# =============================================================================
+literature:
+  literature_search_enabled: true
+  pubmed_enabled: true
+  europe_pmc_enabled: true
+  pmc_fulltext_enabled: true
+  ncbi_email: "jrrmicrolab@gmail.com"   # REQUIRED by NCBI E-utilities etiquette
+  ncbi_api_key: null                    # optional; raises rate limit to 10 req/s
+  max_papers_per_query: 20
+  include_reviews: true                 # retrieved, but flagged as reviews
+  include_preprints: false
+  require_manual_verification_for_gold: true   # default-safe; do not auto-export
+  min_evidence_score_for_gold: 4
+  request_delay_seconds: 0.4            # politeness; auto-tightened with api_key
+  cache_dir: data/litcache             # HTTP responses cached here (gitignored)
+  search_queries_file: data/example/search_queries.txt
+  user_supplied_pmids: []
+  user_supplied_dois: []
+  user_supplied_pdfs_dir: null
+  sequence_mapping_sources: [ncbi_protein, europe_pmc]
+  output_dir: results/literature
+  # Terms used by the evidence extractor. Extend freely.
+  evidence_trigger_terms:
+    - "required for lysis"
+    - "essential for lysis"
+    - "necessary for lysis"
+    - "sufficient for lysis"
+    - "complements"
+    - "complementation"
+    - "restored lysis"
+    - "failed to lyse"
+    - "delayed lysis"
+    - "rapid lysis"
+    - "premature lysis"
+    - "lysis timing"
+    - "timing of lysis"
+    - "amber mutant"
+    - "nonsense mutant"
+    - "knockout"
+    - "deletion mutant"
+    - "membrane depolarization"
+    - "membrane permeabilization"
+    - "depolarize"
+    - "permeabiliz"
+    - "proton motive force"
+    - "endolysin dependent"
+    - "endolysin-dependent"
+    - "co-expression with endolysin"
+    - "chloroform"
+    - "lysis inhibition"
+    - "antiholin"
+    - "pinholin"
+  # Mentions that, alone, do NOT constitute experimental validation.
+  exclusion_terms:
+    - "putative holin"
+    - "predicted holin"
+    - "annotated as holin"
+    - "holin-like domain"
+    - "Pfam"
+    - "BLAST"
+  # Candidate gene/protein name patterns (regex, case-insensitive).
+  gene_name_patterns:
+    - "\\bgene\\s+S\\b"
+    - "\\bS1?0[57]\\b"
+    - "\\bRz1?\\b"
+    - "\\bgp\\d+\\b"
+    - "\\bORF\\d+\\b"
+    - "\\bholin\\b"
+    - "\\bpinholin\\b"
+    - "\\bantiholin\\b"

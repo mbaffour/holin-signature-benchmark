@@ -1,0 +1,48 @@
+# Reproducible, cross-platform environment for holin-signature-benchmark.
+#
+# This is the DEFAULT environment. It is pip-first and works on Windows, Linux,
+# and macOS because every bioinformatics backend (HMMER, FAMSA, trimAl, pairwise
+# alignment) is provided by a pure-pip, statically-linked binding from the
+# Larralde "Bio" ecosystem rather than a native CLI tool.
+#
+# If you are on Linux/macOS and prefer the canonical native CLI tools
+# (hmmer, mafft, mmseqs2, diamond), additionally create the optional
+# environment-native.yml — the pipeline will auto-detect and prefer them.
+#
+#   conda env create -f environment.yml
+#   conda activate holinbench
+#   pip install -e .
+#
+name: holinbench
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      # --- core scientific stack ---
+      - numpy
+      - pandas
+      - scipy
+      - scikit-learn
+      - matplotlib
+      - seaborn
+      - biopython
+      - pyyaml
+      - requests
+      - click
+      - tqdm
+      # --- cross-platform bioinformatics backends (pure-pip wheels) ---
+      - pyhmmer        # HMMER: hmmbuild / hmmsearch / hmmpress / hmmalign
+      - pyfamsa        # FAMSA multiple sequence aligner
+      - pyswrd         # SWORD heuristic pairwise search (clustering prefilter)
+      - pyopal         # SIMD Smith-Waterman (pairwise identity)
+      - logomaker      # sequence logos
+      # pytrimal (optional alignment trimming) has NO Windows wheel and would
+      # try to compile from source, aborting the whole env build on Windows.
+      # It is off by default (alignment.trim: false). To enable it on Linux/macOS:
+      #   pip install pytrimal
+      # - pytrimal
+      # --- dev / test ---
+      - pytest
+      - pytest-cov

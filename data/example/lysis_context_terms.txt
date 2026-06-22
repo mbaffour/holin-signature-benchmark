@@ -1,0 +1,17 @@
+# Lysis-related annotation keywords (case-insensitive substring match).
+# category<TAB>term  (category drives context scoring)
+endolysin	endolysin
+endolysin	lysin
+endolysin	lysozyme
+endolysin	amidase
+endolysin	glycosidase
+endolysin	muramidase
+endolysin	peptidoglycan hydrolase
+sar_endolysin	SAR endolysin
+spanin	spanin
+spanin	Rz
+spanin	Rz1
+spanin	unimolecular spanin
+antiholin	antiholin
+holin	holin
+holin	pinholin

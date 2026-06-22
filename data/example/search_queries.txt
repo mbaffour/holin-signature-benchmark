@@ -1,0 +1,14 @@
+# Literature-mining query groups for Stage 0 (one query per line).
+# group<TAB>query
+general	bacteriophage holin characterization lysis
+general	phage holin lysis timing
+general	holin endolysin membrane permeabilization
+general	holin defective mutant phage lysis
+pinholin	pinholin SAR endolysin
+pinholin	bacteriophage pinholin membrane depolarization
+model_systems	lambda S holin lysis S105 S107
+model_systems	phage 21 pinholin
+model_systems	mycobacteriophage holin lysis cassette
+evidence	holin amber mutant delayed lysis
+evidence	holin complementation restored lysis
+evidence	holin membrane depolarization potential

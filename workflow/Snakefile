@@ -1,0 +1,74 @@
+# Optional Snakemake wrapper over the holinbench CLI.
+#
+# The Python CLI is the source of truth; this Snakefile just expresses the stage
+# dependency graph so `snakemake` can drive the pipeline and parallelize where
+# possible. Run from the repo root:
+#
+#   snakemake -s workflow/Snakefile --cores 1 all
+#
+# Each rule shells out to `holinbench <stage>`. Outputs are the canonical result
+# tables, so re-running only redoes what changed.
+
+CONFIG = "config/config.yaml"
+T = "results/tables"
+
+rule all:
+    input:
+        "results/report.md"
+
+rule validate:
+    output: f"{T}/cleaned_metadata.tsv", f"{T}/qc_flags.tsv"
+    shell:  f"holinbench validate -c {CONFIG}"
+
+rule features:
+    input:  f"{T}/cleaned_metadata.tsv"
+    output: f"{T}/feature_table.tsv"
+    shell:  f"holinbench features -c {CONFIG}"
+
+rule cluster:
+    input:  f"{T}/cleaned_metadata.tsv"
+    output: f"{T}/cluster_assignments.tsv", f"{T}/cluster_summary.tsv"
+    shell:  f"holinbench cluster -c {CONFIG}"
+
+rule align:
+    input:  f"{T}/cluster_assignments.tsv", f"{T}/feature_table.tsv"
+    output: f"{T}/alignment_quality.tsv"
+    shell:  f"holinbench align -c {CONFIG}"
+
+rule build_hmms:
+    input:  f"{T}/alignment_quality.tsv"
+    output: f"{T}/hmm_model_metadata.tsv"
+    shell:  f"holinbench build-hmms -c {CONFIG}"
+
+rule scan:
+    input:  f"{T}/hmm_model_metadata.tsv"
+    output: f"{T}/hmm_scan_results.tsv"
+    shell:  f"holinbench scan -c {CONFIG}"
+
+rule context:
+    input:  f"{T}/feature_table.tsv"
+    output: f"{T}/context_table.tsv"
+    shell:  f"holinbench context -c {CONFIG}"
+
+rule score:
+    input:  f"{T}/hmm_scan_results.tsv", f"{T}/context_table.tsv"
+    output: f"{T}/candidate_ranking.tsv"
+    shell:  f"holinbench score -c {CONFIG}"
+
+rule benchmark:
+    input:  f"{T}/hmm_scan_results.tsv", f"{T}/feature_table.tsv"
+    output: f"{T}/benchmark_metrics.tsv"
+    shell:  f"holinbench benchmark -c {CONFIG}"
+
+rule motifs:
+    input:  f"{T}/alignment_quality.tsv"
+    output: f"{T}/motif_conservation_summary.tsv"
+    shell:  f"holinbench motifs -c {CONFIG}"
+
+rule report:
+    input:
+        f"{T}/candidate_ranking.tsv",
+        f"{T}/benchmark_metrics.tsv",
+        f"{T}/motif_conservation_summary.tsv",
+    output: "results/report.md"
+    shell:  f"holinbench report -c {CONFIG}"

@@ -1,0 +1,46 @@
+# OPTIONAL native-toolchain environment (Linux / macOS only).
+#
+# The default environment.yml is fully cross-platform and self-contained. Use
+# THIS file only if you are on Linux/macOS and want the canonical native CLI
+# tools. When present on PATH, the pipeline auto-detects and prefers them over
+# the pure-pip bindings (see src/holinbench/{hmmer,alignment,clustering}.py).
+#
+# These bioconda packages do NOT provide Windows builds — Windows users should
+# use the default environment.yml (pyhmmer/pyfamsa cover the same functionality).
+#
+#   conda env create -f environment-native.yml
+#   conda activate holinbench-native
+#   pip install -e .
+#
+name: holinbench-native
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.12
+  - hmmer        # hmmbuild / hmmsearch / hmmpress / hmmalign
+  - mafft        # multiple sequence alignment
+  - mmseqs2      # clustering / redundancy reduction
+  - diamond      # fast similarity search (optional)
+  - cd-hit       # alternative clustering (optional)
+  - pip
+  - pip:
+      - numpy
+      - pandas
+      - scipy
+      - scikit-learn
+      - matplotlib
+      - seaborn
+      - biopython
+      - pyyaml
+      - requests
+      - click
+      - tqdm
+      - pyhmmer
+      - pyfamsa
+      - pytrimal
+      - pyswrd
+      - pyopal
+      - logomaker
+      - pytest
+      - pytest-cov
