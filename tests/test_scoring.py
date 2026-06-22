@@ -53,6 +53,29 @@ def test_confidence_categories(toy_cfg):
     assert scoring.confidence_category(0.1, toy_cfg) == "unlikely_holin"
 
 
+def test_scoring_empty_input_does_not_crash(toy_cfg):
+    clean = validate.run(toy_cfg)["clean"]
+    feats = features.run(toy_cfg, clean)
+    # restrict to a category that doesn't exist -> empty, must not raise
+    ranking = scoring.run(toy_cfg, feats, None, hmm_hits=None,
+                          restrict_categories=["does_not_exist"])
+    assert ranking.empty
+    assert "final_holin_score" in ranking.columns
+
+
+def test_scoring_context_absent_renormalizes(toy_cfg):
+    clean = validate.run(toy_cfg)["clean"]
+    feats = features.run(toy_cfg, clean)
+    # No context supplied at all -> context term renormalized out, not a flat 0.5.
+    ranking = scoring.run(toy_cfg, feats, context=None, hmm_hits=None,
+                          restrict_categories=["unknown"])
+    row = ranking[ranking["protein_id"] == "c1"].iloc[0]
+    # with hmm=0 and context renormalized out, final == arch * w_arch/(w_hmm+w_arch)
+    expected = row["architecture_score"] * 0.30 / (0.45 + 0.30)
+    assert abs(row["final_holin_score"] - round(expected, 4)) < 1e-3
+    assert "renormalized out" in row["explanation"]
+
+
 def test_full_scoring_ranks_cassette_candidate_above_soluble(toy_cfg):
     clean = validate.run(toy_cfg)["clean"]
     feats = features.run(toy_cfg, clean)

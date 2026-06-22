@@ -16,7 +16,9 @@ import pandas as pd
 from .config import Config
 from .utils import log
 
-# Evidence-trigger taxonomy used for scoring (lowercased substrings).
+# Evidence-trigger taxonomy used for scoring (lowercased substrings). These are
+# DEFAULTS; config/config.yaml -> literature.trigger_terms overrides them so
+# scoring stays configurable (PROJECT_SPEC: "scoring must be configurable").
 GENETIC = ["amber mutant", "nonsense mutant", "knockout", "knock-out",
            "deletion mutant", "complementation", "complements", "complemented"]
 FUNCTIONAL_LYSIS = ["required for lysis", "essential for lysis", "necessary for lysis",
@@ -27,10 +29,37 @@ MEMBRANE = ["membrane depolarization", "membrane permeabilization", "depolariz",
             "permeabiliz", "proton motive force", "membrane potential",
             "triggered the membrane"]
 ENDOLYSIN_DEP = ["endolysin dependent", "endolysin-dependent",
-                 "co-expression with endolysin", "coexpression with endolysin",
-                 "chloroform"]
+                 "co-expression with endolysin", "coexpression with endolysin"]
+# Weak-only assay terms: NEVER sufficient alone; only count alongside a stronger
+# trigger AND a holin subject (chloroform sensitivity is a generic lysis assay).
+WEAK_ASSAY = ["chloroform"]
+# Subject terms a trigger must co-occur with IN THE SAME SENTENCE to count.
+HOLIN_SUBJECTS = ["holin", "pinholin", "antiholin", "lysis protein", "holin-like",
+                  "gene s", "s105", "s107", "sar endolysin"]
 ANNOTATION_ONLY = ["putative holin", "predicted holin", "annotated as holin",
                    "holin-like domain", "pfam", "blast", "homolog of"]
+
+
+def _trigger_config(cfg: Config) -> dict:
+    """Resolve the (configurable) evidence-trigger taxonomy.
+
+    Reads literature.trigger_terms / weak_assay_terms / holin_subject_terms /
+    exclusion_terms from config, falling back to the module-level defaults when a
+    key is absent. Returns a dict of lowercased term lists.
+    """
+    lit = cfg.section("literature") if cfg is not None else {}
+    tt = lit.get("trigger_terms") or {}
+    def _lc(terms):
+        return [str(t).lower() for t in (terms or [])]
+    return {
+        "genetic": _lc(tt.get("genetic")) or GENETIC,
+        "functional": _lc(tt.get("functional_lysis")) or FUNCTIONAL_LYSIS,
+        "membrane": _lc(tt.get("membrane")) or MEMBRANE,
+        "endo": _lc(tt.get("endolysin_dependent")) or ENDOLYSIN_DEP,
+        "weak_assay": _lc(lit.get("weak_assay_terms")) or WEAK_ASSAY,
+        "subjects": _lc(lit.get("holin_subject_terms")) or HOLIN_SUBJECTS,
+        "annotation_only": _lc(lit.get("exclusion_terms")) or ANNOTATION_ONLY,
+    }
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -45,6 +74,57 @@ def _matches(text: str, terms: list[str]) -> list[str]:
     return [term for term in terms if term in t]
 
 
+def _has_subject(sentence_l: str, subjects: list[str]) -> bool:
+    return any(subj in sentence_l for subj in subjects)
+
+
+def _score_per_sentence(text: str, tc: dict) -> dict:
+    """Subject-bound, per-sentence evidence aggregation.
+
+    A trigger only counts when it appears IN THE SAME SENTENCE as a holin subject
+    term. Weak-assay terms (chloroform) are tracked separately and only counted
+    when that same sentence also carries a stronger trigger. Returns the
+    document-level category sets used by ``_evidence_score`` plus bookkeeping.
+    """
+    genetic: set[str] = set()
+    functional: set[str] = set()
+    membrane: set[str] = set()
+    endo: set[str] = set()
+    weak_assay: set[str] = set()
+    subject_seen = False
+    best_sentence = ""
+    for sent in _split_sentences(text):
+        sl = sent.lower()
+        if not _has_subject(sl, tc["subjects"]):
+            continue
+        subject_seen = True
+        g = [t for t in tc["genetic"] if t in sl]
+        f = [t for t in tc["functional"] if t in sl]
+        m = [t for t in tc["membrane"] if t in sl]
+        e = [t for t in tc["endo"] if t in sl]
+        w = [t for t in tc["weak_assay"] if t in sl]
+        strong = g + f + m + e
+        # weak-assay terms only count when corroborated by a stronger trigger in
+        # the SAME (subject-bound) sentence.
+        if w and strong:
+            weak_assay.update(w)
+        genetic.update(g)
+        functional.update(f)
+        membrane.update(m)
+        endo.update(e)
+        if (strong or (w and strong)) and not best_sentence:
+            best_sentence = sent[:400]
+    return {
+        "genetic": sorted(genetic),
+        "functional": sorted(functional),
+        "membrane": sorted(membrane),
+        "endo": sorted(endo),
+        "weak_assay": sorted(weak_assay),
+        "subject_seen": subject_seen,
+        "best_sentence": best_sentence,
+    }
+
+
 def _find_candidate_names(text: str, patterns: list[str]) -> list[str]:
     found: dict[str, int] = {}
     for pat in patterns:
@@ -55,17 +135,44 @@ def _find_candidate_names(text: str, patterns: list[str]) -> list[str]:
     return [n for n, _ in sorted(found.items(), key=lambda kv: -kv[1])][:6]
 
 
-def _evidence_score(genetic, functional, membrane, endo, annotation_only) -> int:
+def _evidence_score(genetic, functional, membrane, endo, annotation_only,
+                    subject_seen=None) -> int:
+    """Map subject-bound evidence sets to the documented 0-5 ladder.
+
+    5 = genetic + (functional/membrane/endo); 4 = direct functional lysis, or
+    membrane corroborated by genetic/functional; 3 = strong but single-line /
+    uncorroborated (membrane-only or endolysin-dependent-only); 2 = a holin claim
+    (subject present) with no qualifying trigger, but not purely annotation-only;
+    1 = annotation/prediction only; 0 = none.
+
+    Weak-assay terms (chloroform) are deliberately NOT an input here: by the time
+    sets reach this function they have already been filtered to only count when
+    corroborated by a stronger trigger, so they can never lift the score alone.
+    Annotation-only ALWAYS caps the score at 1 when there is no trigger evidence.
+    """
     has_g = bool(genetic)
     has_func = bool(functional)
     has_mem = bool(membrane)
     has_endo = bool(endo)
+    has_trigger = has_g or has_func or has_mem or has_endo
+
+    # (C4) Annotation terms present with NO subject-bound trigger -> cap at 1,
+    # regardless of unrelated lysis terms elsewhere.
+    if annotation_only and not has_trigger:
+        return 1
+
     if has_g and (has_func or has_mem or has_endo):
         return 5
-    if has_mem or (has_func and has_endo):
+    # Direct functional lysis evidence, or membrane corroborated by genetic/
+    # functional, reaches 4. Membrane ALONE is only a 3.
+    if has_func or (has_mem and (has_g or has_func)):
         return 4
-    if has_func or has_endo:
+    if has_mem or has_endo:
         return 3
+    # No qualifying trigger sentence. If a holin subject was nonetheless asserted
+    # and this is not purely annotation-only -> a claim with indirect evidence (2).
+    if subject_seen and not annotation_only:
+        return 2
     if annotation_only:
         return 1
     return 0
@@ -74,14 +181,15 @@ def _evidence_score(genetic, functional, membrane, endo, annotation_only) -> int
 def _classify(score: int, text_l: str, annotation_only: bool):
     is_pin = "pinholin" in text_l or "sar endolysin" in text_l or "pin-holin" in text_l
     is_like = "holin-like" in text_l or "lysis protein" in text_l
-    if score >= 5:
-        cls = "experimentally_validated_pinholin" if is_pin else "experimentally_validated_holin"
-        reason = "direct genetic + functional/membrane evidence"
-    elif score == 4:
+    # Apply pinholin / holin-like qualifiers consistently across the 5 AND 4 tiers.
+    if score >= 4:
         cls = ("experimentally_validated_pinholin" if is_pin else
                ("experimentally_validated_holin_like_lysis_protein" if is_like else
                 "experimentally_validated_holin"))
-        reason = "direct functional lysis or membrane evidence"
+        if score >= 5:
+            reason = "direct genetic + functional/membrane evidence"
+        else:
+            reason = "direct functional lysis or corroborated membrane evidence"
     elif score == 3:
         cls = "experimentally_validated_holin"
         reason = "strong experimental evidence; sequence mapping/identity to verify"
@@ -106,6 +214,75 @@ def _paper_text(cfg: Config, row, fulltext_dir: Path) -> tuple[str, str]:
     return " ".join(parts), "abstract+fulltext" if ftpath.exists() else "title+abstract"
 
 
+def _append_qc(row_flags: str, *new_flags: str) -> str:
+    """Append new QC flags to an existing semicolon-joined qc_flags string."""
+    existing = [f.strip() for f in str(row_flags or "").split(";") if f.strip()]
+    for f in new_flags:
+        if f and f not in existing:
+            existing.append(f)
+    return "; ".join(existing)
+
+
+def _apply_qc_post_pass(candidates: pd.DataFrame) -> pd.DataFrame:
+    """Post-pass QC flags required by PROJECT_SPEC (~line 231).
+
+    Adds, on top of the per-row flags already present:
+      - duplicate_across_papers: same gene/protein name (or identical mapped
+        sequence) appears in more than one distinct paper.
+      - conflicting_name_for_accession: one accession maps to >1 distinct
+        gene_name.
+      - review_citation_only: a review_article whose only holin mention is
+        background (holin_only_in_background also present).
+    """
+    if candidates.empty:
+        return candidates
+
+    qc = candidates["qc_flags"].tolist()
+
+    def _norm(s):
+        return str(s or "").strip().lower()
+
+    # (a) duplicate protein/gene name (or identical mapped sequence) across papers.
+    for key_col in ("gene_name", "sequence"):
+        if key_col not in candidates.columns:
+            continue
+        groups: dict[str, set] = {}
+        for i, r in candidates.iterrows():
+            val = _norm(r.get(key_col, ""))
+            if not val or val in ("(unspecified)",):
+                continue
+            groups.setdefault(val, set()).add(_norm(r.get("paper_id", "")))
+        dup_vals = {v for v, papers in groups.items() if len(papers) > 1}
+        if dup_vals:
+            for pos, (i, r) in enumerate(candidates.iterrows()):
+                if _norm(r.get(key_col, "")) in dup_vals:
+                    qc[pos] = _append_qc(qc[pos], "duplicate_across_papers")
+
+    # (b) conflicting gene_names for the same accession.
+    if "accession" in candidates.columns:
+        acc_names: dict[str, set] = {}
+        for i, r in candidates.iterrows():
+            acc = _norm(r.get("accession", ""))
+            if not acc:
+                continue
+            acc_names.setdefault(acc, set()).add(_norm(r.get("gene_name", "")))
+        conflict_acc = {a for a, names in acc_names.items() if len(names) > 1}
+        if conflict_acc:
+            for pos, (i, r) in enumerate(candidates.iterrows()):
+                if _norm(r.get("accession", "")) in conflict_acc:
+                    qc[pos] = _append_qc(qc[pos], "conflicting_name_for_accession")
+
+    # (c) review-citation-only: review_article AND holin_only_in_background.
+    for pos, flags in enumerate(qc):
+        present = {f.strip() for f in str(flags).split(";")}
+        if "review_article" in present and "holin_only_in_background" in present:
+            qc[pos] = _append_qc(qc[pos], "review_citation_only")
+
+    candidates = candidates.copy()
+    candidates["qc_flags"] = qc
+    return candidates
+
+
 def run_extract(cfg: Config) -> pd.DataFrame:
     lit = cfg.section("literature")
     out_dir = cfg.resolve(lit.get("output_dir", "results/literature"))
@@ -117,6 +294,7 @@ def run_extract(cfg: Config) -> pd.DataFrame:
     papers = pd.read_csv(search_path, sep="\t", dtype=str, keep_default_na=False)
     patterns = lit.get("gene_name_patterns", [r"\bholin\b", r"\bpinholin\b",
                                               r"\bgp\d+\b", r"\bS10[57]\b"])
+    tc = _trigger_config(cfg)
 
     sent_rows, cand_rows = [], []
     for _, row in papers.iterrows():
@@ -124,31 +302,48 @@ def run_extract(cfg: Config) -> pd.DataFrame:
         text_l = text.lower()
         if "holin" not in text_l and "lysis" not in text_l:
             continue
-        genetic = _matches(text, GENETIC)
-        functional = _matches(text, FUNCTIONAL_LYSIS)
-        membrane = _matches(text, MEMBRANE)
-        endo = _matches(text, ENDOLYSIN_DEP)
-        annotation_only = _matches(text, ANNOTATION_ONLY)
-        all_triggers = genetic + functional + membrane + endo
+
+        # PER-SENTENCE, subject-bound aggregation. A trigger only counts when it
+        # co-occurs with a holin subject term in the SAME sentence; this prevents
+        # an unrelated "required for lysis"/"chloroform"/"depolariz" elsewhere in
+        # the document from promoting an annotation-only paper.
+        ev = _score_per_sentence(text, tc)
+        genetic = ev["genetic"]
+        functional = ev["functional"]
+        membrane = ev["membrane"]
+        endo = ev["endo"]
+        weak_assay = ev["weak_assay"]
+        annotation_only = _matches(text, tc["annotation_only"])
+        # Only subject-bound triggers; weak-assay terms are appended for the audit
+        # trail but already filtered to corroborated occurrences in ev.
+        all_triggers = genetic + functional + membrane + endo + weak_assay
+        best_sentence = ev["best_sentence"]
 
         # "holin only in introduction" heuristic: holin in title/abstract but no
-        # trigger anywhere -> background mention.
+        # subject-bound trigger anywhere -> background mention.
         holin_in_intro_only = ("holin" in (str(row.get("title", "")) + " " +
                                            str(row.get("abstract", ""))).lower()
                                and not all_triggers)
 
-        # evidence sentences
-        best_sentence = ""
+        # Emit per-sentence evidence rows (subject-bound only).
         for sent in _split_sentences(text):
-            hit_terms = _matches(sent, all_triggers)
-            if hit_terms:
+            sl = sent.lower()
+            if not _has_subject(sl, tc["subjects"]):
+                continue
+            hit = ([t for t in tc["genetic"] if t in sl] +
+                   [t for t in tc["functional"] if t in sl] +
+                   [t for t in tc["membrane"] if t in sl] +
+                   [t for t in tc["endo"] if t in sl])
+            weak_hit = [t for t in tc["weak_assay"] if t in sl]
+            if weak_hit and hit:
+                hit += weak_hit
+            if hit:
                 sent_rows.append({"paper_id": row["paper_id"], "pmid": row.get("pmid", ""),
-                                  "trigger_terms": "; ".join(hit_terms),
+                                  "trigger_terms": "; ".join(hit),
                                   "section": section, "evidence_sentence": sent[:400]})
-                if not best_sentence:
-                    best_sentence = sent[:400]
 
-        score = _evidence_score(genetic, functional, membrane, endo, annotation_only)
+        score = _evidence_score(genetic, functional, membrane, endo, annotation_only,
+                                subject_seen=ev["subject_seen"])
         cls, reason = _classify(score, text_l, bool(annotation_only))
         names = _find_candidate_names(text, patterns) or ["(unspecified)"]
 
@@ -182,6 +377,7 @@ def run_extract(cfg: Config) -> pd.DataFrame:
     sentences = pd.DataFrame(sent_rows, columns=["paper_id", "pmid", "trigger_terms",
                                                  "section", "evidence_sentence"])
     candidates = pd.DataFrame(cand_rows)
+    candidates = _apply_qc_post_pass(candidates)
     sentences.to_csv(out_dir / "candidate_evidence_sentences.tsv", sep="\t", index=False)
     candidates.to_csv(out_dir / "candidate_holin_literature_table.tsv", sep="\t", index=False)
     n_strong = int((candidates["evidence_score"] >= 4).sum()) if not candidates.empty else 0
@@ -288,6 +484,16 @@ def run_export_curated(cfg: Config) -> Path:
     accept_mask = scores >= min_score
     if require_manual:
         accept_mask = accept_mask & is_verified
+    else:
+        # The default is require_manual_verification_for_gold=True (safe). When a
+        # user explicitly turns it off, human review is being bypassed; warn LOUDLY.
+        log.warning(
+            "*** WARNING: require_manual_verification_for_gold is FALSE. "
+            "Human verification is being BYPASSED -- candidates with "
+            "evidence_score >= %d will be exported as gold WITHOUT manual review. "
+            "This is NOT the safe default; results may include annotation-only or "
+            "misread proteins. Set require_manual_verification_for_gold: true to "
+            "restore the conservative gate. ***", min_score)
     accepted = df[accept_mask].copy()
     rejected = df[~accept_mask].copy()
     accepted.to_csv(out_dir / "accepted_gold_holins.tsv", sep="\t", index=False)

@@ -45,6 +45,29 @@ def test_build_score_table_labels(toy_cfg):
     assert g1.iloc[0]["family"] == 60.0
 
 
+def test_topk_recovery_pessimistic_tiebreak():
+    # positive and negative tied at the top score; pessimistic tie-break must NOT
+    # credit the tie to the positive when k=1.
+    assert benchmark._topk_recovery([1, 0], [0.9, 0.9], k=1) == 0.0
+
+
+def test_best_f1_threshold_prefers_higher_among_ties():
+    # scores where multiple thresholds give the same (perfect) F1; the higher
+    # specificity-favoring threshold should be chosen.
+    t = benchmark._best_f1_threshold([0, 0, 1, 1], [0.1, 0.2, 0.8, 0.9])
+    assert t >= 0.8
+
+
+def test_build_score_table_excludes_leakage(toy_cfg):
+    clean = validate.run(toy_cfg)["clean"]
+    feats = features.run(toy_cfg, clean)
+    ctx = context.run(toy_cfg, feats)
+    # n1 duplicates g1's sequence; exclude it as leakage
+    score_df = benchmark._build_score_table(toy_cfg, feats, ctx, pd.DataFrame(),
+                                            exclude_ids={"n1"})
+    assert "n1" not in set(score_df["protein_id"])
+
+
 def test_evaluate_models_columns(toy_cfg):
     score_df = pd.DataFrame({
         "protein_id": ["g1", "g2", "n1", "n2"],

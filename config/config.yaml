@@ -92,6 +92,7 @@ context:
     not_near_any_lysis_gene: -1.0
     too_large_or_multidomain: -1.0
   endolysin_near_genes: 3      # "near" endolysin = within this many genes
+  spanin_near_genes: 5         # "near" spanin = within this many genes
 
 # ----------------------------------------- candidate scoring (S8) ------------
 # Composite holin_candidate_score = hmm_score + architecture_score + context_score
@@ -230,6 +231,62 @@ literature:
     - "holin-like domain"
     - "Pfam"
     - "BLAST"
+  # Categorized evidence triggers used by the per-sentence, conservative
+  # evidence scorer (evidence.py). Each trigger only counts when it co-occurs in
+  # the SAME sentence as a holin subject term (see holin_subject_terms). If a
+  # category is omitted here, evidence.py falls back to its built-in defaults.
+  trigger_terms:
+    genetic:
+      - "amber mutant"
+      - "nonsense mutant"
+      - "knockout"
+      - "knock-out"
+      - "deletion mutant"
+      - "complementation"
+      - "complements"
+      - "complemented"
+    functional_lysis:
+      - "required for lysis"
+      - "essential for lysis"
+      - "necessary for lysis"
+      - "sufficient for lysis"
+      - "restored lysis"
+      - "failed to lyse"
+      - "delayed lysis"
+      - "rapid lysis"
+      - "premature lysis"
+      - "lysis timing"
+      - "timing of lysis"
+      - "abolished lysis"
+    membrane:
+      - "membrane depolarization"
+      - "membrane permeabilization"
+      - "depolariz"
+      - "permeabiliz"
+      - "proton motive force"
+      - "membrane potential"
+    endolysin_dependent:
+      - "endolysin dependent"
+      - "endolysin-dependent"
+      - "co-expression with endolysin"
+      - "coexpression with endolysin"
+  # Weak-only assay terms: count toward score 3 only WITH a holin subject and
+  # another stronger trigger; never sufficient alone (e.g. chloroform sensitivity
+  # is a generic lysis assay, not holin-specific).
+  weak_assay_terms:
+    - "chloroform"
+  # A candidate/evidence sentence must mention one of these to bind a trigger to
+  # an actual holin subject (prevents off-topic lysis sentences from validating).
+  holin_subject_terms:
+    - "holin"
+    - "pinholin"
+    - "antiholin"
+    - "lysis protein"
+    - "holin-like"
+    - "gene s"
+    - "s105"
+    - "s107"
+    - "sar endolysin"
   # Candidate gene/protein name patterns (regex, case-insensitive).
   gene_name_patterns:
     - "\\bgene\\s+S\\b"

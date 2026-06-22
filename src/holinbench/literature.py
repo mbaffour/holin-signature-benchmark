@@ -27,8 +27,15 @@ EPMC = "https://www.ebi.ac.uk/europepmc/webservices/rest"
 
 
 # --------------------------------------------------------- HTTP + cache --------
+# Credential params that must NOT affect the cache key: the same scientific query
+# should reuse cache regardless of who ran it / which API key was supplied.
+_CACHE_IGNORED_PARAMS = ("email", "api_key", "tool")
+
+
 def _cache_path(cache_dir: Path, url: str, params: dict) -> Path:
-    key = url + "?" + json.dumps(params, sort_keys=True)
+    # Exclude credentials so cache hits are determined by the query alone.
+    key_params = {k: v for k, v in params.items() if k not in _CACHE_IGNORED_PARAMS}
+    key = url + "?" + json.dumps(key_params, sort_keys=True)
     h = hashlib.sha1(key.encode()).hexdigest()[:16]
     return cache_dir / f"{h}.cache"
 
@@ -56,6 +63,50 @@ def _http_get(cfg: Config, url: str, params: dict, *, is_json: bool, delay: floa
     text = resp.text
     cpath.write_text(text, encoding="utf-8")
     return resp.json() if is_json else text
+
+
+# --------------------------------------------------------- dedup helpers -------
+def _title_key(p: dict) -> str:
+    """Fallback dedup key when no DOI/PMID/PMCID is available.
+
+    A bare 60-char title prefix can collide distinct papers (e.g. shared boiler-
+    plate prefixes). Normalize the WHOLE title (lowercase, alnum-only) and append
+    the publication year so different papers with similar leading words don't
+    merge.
+    """
+    title = str(p.get("title", "") or "")
+    norm = "".join(ch for ch in title.lower() if ch.isalnum())
+    if not norm:
+        return ""
+    year = str(p.get("year", "") or "")
+    return f"title:{norm}|{year}"
+
+
+# Fields whose presence makes a record "richer" for OA full-text retrieval.
+_OA_MERGE_FIELDS = ("is_oa", "epmc_source", "epmc_id", "pmcid")
+
+
+def _merge_paper_records(existing: dict, incoming: dict) -> None:
+    """Merge an incoming duplicate record into the kept record in place.
+
+    The first record (often PubMed) wins for stable bibliographic fields, but
+    OA/full-text-enabling fields and any field the existing record is missing are
+    carried over from whichever source has them, so OA full-text fetch is not lost
+    when the OA-aware Europe PMC record arrives second.
+    """
+    # Always prefer a truthy OA flag and carry over EPMC fetch identifiers.
+    for field in _OA_MERGE_FIELDS:
+        inc = incoming.get(field)
+        if field == "is_oa":
+            existing["is_oa"] = bool(existing.get("is_oa")) or bool(inc)
+        elif inc and not existing.get(field):
+            existing[field] = inc
+    # Fill any other field the existing record lacks (e.g. abstract, doi, pmid).
+    for field, inc in incoming.items():
+        if field in ("_queries",):
+            continue
+        if inc and not existing.get(field):
+            existing[field] = inc
 
 
 # --------------------------------------------------------- PubMed --------------
@@ -210,24 +261,37 @@ def run_search(cfg: Config) -> pd.DataFrame:
         for p in papers:
             if p.get("is_review") and not include_reviews:
                 continue
-            key = p.get("doi") or p.get("pmid") or p.get("pmcid") or p.get("title", "")[:60]
+            key = (p.get("doi") or p.get("pmid") or p.get("pmcid")
+                   or _title_key(p))
             if not key:
                 continue
             if key in records:
+                # Same paper from another source (e.g. PubMed + Europe PMC). Merge
+                # so OA / full-text-enabling fields (is_oa, epmc_source, epmc_id)
+                # survive even when the first-seen record (PubMed) lacked them.
+                _merge_paper_records(records[key], p)
                 records[key].setdefault("_queries", set()).add(f"{grp}:{q}")
                 continue
             paper_id = "lit_" + hashlib.sha1(key.encode()).hexdigest()[:10]
-            ft = ""
-            if lit.get("pmc_fulltext_enabled", True) and p.get("is_oa") and p.get("source") == "europe_pmc":
-                ft = _epmc_fulltext(cfg, p.get("epmc_source"), p.get("epmc_id"), delay)
-                if ft:
-                    (fulltext_dir / f"{paper_id}.txt").write_text(ft, encoding="utf-8")
             url = (f"https://pubmed.ncbi.nlm.nih.gov/{p['pmid']}/" if p.get("pmid")
                    else (f"https://doi.org/{p['doi']}" if p.get("doi") else ""))
             rec = {**p, "paper_id": paper_id, "query_group": grp, "query": q,
-                   "has_fulltext": bool(ft), "url": url,
+                   "has_fulltext": False, "url": url,
                    "_queries": {f"{grp}:{q}"}}
             records[key] = rec
+
+    # Full-text fetch as a POST-PASS over the deduped+merged records, so OA fields
+    # that arrived on a later merge (e.g. PubMed first, Europe PMC second) still
+    # trigger the OA full-text download.
+    if lit.get("pmc_fulltext_enabled", True):
+        for rec in records.values():
+            if rec.get("has_fulltext"):
+                continue
+            if rec.get("is_oa") and rec.get("epmc_source") and rec.get("epmc_id"):
+                ft = _epmc_fulltext(cfg, rec.get("epmc_source"), rec.get("epmc_id"), delay)
+                if ft:
+                    (fulltext_dir / f"{rec['paper_id']}.txt").write_text(ft, encoding="utf-8")
+                    rec["has_fulltext"] = True
 
     rows = []
     for rec in records.values():

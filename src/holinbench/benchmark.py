@@ -60,13 +60,16 @@ def _operating_point(y_true, y_score, threshold) -> dict:
 
 
 def _best_f1_threshold(y_true, y_score) -> float:
+    # Iterate thresholds ASCENDING and keep the best F1 with `>=`, so among ties
+    # the HIGHER threshold wins. This favors specificity rather than silently
+    # biasing the operating point toward calling everything positive.
     cands = sorted(set(y_score))
     if not cands:
         return 0.5
     best_t, best_f1 = cands[0], -1.0
     for t in cands:
         op = _operating_point(y_true, y_score, t)
-        if op["f1"] == op["f1"] and op["f1"] > best_f1:
+        if op["f1"] == op["f1"] and op["f1"] >= best_f1:
             best_f1, best_t = op["f1"], t
     return best_t
 
@@ -96,8 +99,12 @@ def _topk_recovery(y_true, y_score, k=None) -> float:
     if n_pos == 0:
         return float("nan")
     k = k or n_pos
-    order = np.argsort(y_score)[::-1][:k]
-    return round(sum(np.asarray(y_true)[order]) / n_pos, 3)
+    # Deterministic, PESSIMISTIC tie-break: sort by descending score, and among
+    # equal scores place negatives (label 0) ahead of positives (label 1), so a
+    # tie between a positive and a negative does not flatter recovery.
+    order = sorted(range(len(y_score)), key=lambda i: (-y_score[i], y_true[i]))
+    top = order[:k]
+    return round(sum(y_true[i] for i in top) / n_pos, 3)
 
 
 # --------------------------------------------------- per-model score vectors ---
@@ -115,13 +122,21 @@ def _hmm_type_scores(hits: pd.DataFrame) -> dict[str, dict[str, float]]:
 
 
 def _build_score_table(cfg: Config, feats: pd.DataFrame, context: pd.DataFrame | None,
-                       hits: pd.DataFrame) -> pd.DataFrame:
-    """Per-protein score for each of the 7 models, restricted to gold + negatives."""
+                       hits: pd.DataFrame, exclude_ids: set | None = None) -> pd.DataFrame:
+    """Per-protein score for each of the 7 models, restricted to gold + negatives.
+
+    `exclude_ids` drops leakage cases (e.g. a hard negative whose sequence is
+    identical to a gold positive) so they cannot taint the metrics.
+    """
     sub = feats[feats["dataset_category"].isin([POS_LABEL, NEG_LABEL])].copy()
+    if exclude_ids:
+        sub = sub[~sub["protein_id"].isin(exclude_ids)]
     type_scores = _hmm_type_scores(hits)
+    ctx_ids = set()
     ctx_lookup = {}
     if context is not None and not context.empty:
         ctx_lookup = dict(zip(context["protein_id"], context["context_score"]))
+        ctx_ids = set(context["protein_id"])
     w = cfg.dotted("scoring.weights", {"hmm": 0.45, "architecture": 0.30, "context": 0.25})
 
     rows = []
@@ -132,14 +147,19 @@ def _build_score_table(cfg: Config, feats: pd.DataFrame, context: pd.DataFrame |
         phits = hits[hits["protein_id"] == pid] if (hits is not None and not hits.empty) else None
         hmm_val, _, _ = hmm_score(phits, cfg)
         arch, _ = architecture_score(fr.to_dict(), cfg)
+        has_ctx = pid in ctx_ids
         raw_ctx = float(ctx_lookup.get(pid, 0.0))
         ctx_val = context_norm(raw_ctx)
-        denom = w.get("hmm", 0.45) + w.get("architecture", 0.30)
-        hmm_arch = (w.get("hmm", 0.45) * hmm_val + w.get("architecture", 0.30) * arch) / denom
-        full = (w.get("hmm", 0.45) * hmm_val + w.get("architecture", 0.30) * arch +
-                w.get("context", 0.25) * ctx_val)
+        wh, wa, wc = w.get("hmm", 0.45), w.get("architecture", 0.30), w.get("context", 0.25)
+        hmm_arch = (wh * hmm_val + wa * arch) / (wh + wa)
+        # Mirror scoring.py: when a protein has no context row, drop the context
+        # term and renormalize, rather than crediting a flat 0.5.
+        if has_ctx:
+            full = wh * hmm_val + wa * arch + wc * ctx_val
+        else:
+            full = (wh * hmm_val + wa * arch) / (wh + wa)
         rows.append({
-            "protein_id": pid, "label": label,
+            "protein_id": pid, "label": label, "has_context": has_ctx,
             "universal": ts["universal"], "topology": ts["topology"], "family": ts["family"],
             "architecture": arch, "context": ctx_val,
             "hmm_arch": round(hmm_arch, 4), "hmm_arch_context": round(full, 4),
@@ -177,30 +197,40 @@ def _evaluate_models(score_df: pd.DataFrame, models: list[str], cfg: Config) -> 
             "circularity_warning": "YES (HMM built on these gold)" if model in
                                    ("universal", "topology", "family", "hmm_arch",
                                     "hmm_arch_context") else "no",
+            "note": "",
         })
     return pd.DataFrame(rows)
 
 
 # --------------------------------------------------- LOFO (honest) -------------
 def leave_one_family_out_universal(cfg: Config, clean: pd.DataFrame,
-                                   feats: pd.DataFrame) -> pd.DataFrame:
+                                   feats: pd.DataFrame,
+                                   exclude_ids: set | None = None) -> pd.DataFrame:
     """Rebuild the universal HMM excluding each family; test recovery of the
     held-out family vs. false hits on hard negatives. The honest generalization test.
     """
     gold = clean[clean["dataset_category"] == "gold"].copy()
     neg = clean[clean["dataset_category"] == "hard_negative"].copy()
+    if exclude_ids:
+        # Drop leakage negatives (identical to a gold sequence) so they don't
+        # inflate the false-hit count.
+        neg = neg[~neg["protein_id"].isin(exclude_ids)]
     if gold.empty:
         return pd.DataFrame()
 
     # Family key: family_label if present, else cluster at primary threshold.
-    fam_key = gold["family_label"].fillna("").replace("", np.nan)
-    if fam_key.isna().any():
+    # Robust to empty-string OR NaN labels (don't rely on truthiness of NaN).
+    fam_label = gold["family_label"].fillna("").astype(str)
+    needs_cluster = fam_label.str.strip() == ""
+    if needs_cluster.any():
         clusters = clustering.run(cfg, clean)
         pcol = f"cluster_{int(cfg.dotted('clustering.primary_threshold', 0.30) * 100)}"
         cmap = dict(zip(clusters["protein_id"], clusters[pcol])) if pcol in clusters else {}
-        fam_key = gold.apply(lambda r: r["family_label"] if r["family_label"]
-                             else f"cluster{cmap.get(r['protein_id'], 'NA')}", axis=1)
-    gold = gold.assign(_fam=list(fam_key))
+        fam_key = [lab if lab.strip() else f"cluster{cmap.get(pid, 'NA')}"
+                   for lab, pid in zip(fam_label, gold["protein_id"])]
+    else:
+        fam_key = list(fam_label)
+    gold = gold.assign(_fam=fam_key)
 
     evalue = float(cfg.dotted("hmmer.evalue_cutoff", 0.01))
     neg_records_df = neg[["protein_id", "sequence", "dataset_category"]].copy()
@@ -247,7 +277,21 @@ def run(cfg: Config, feats: pd.DataFrame, context: pd.DataFrame | None,
     models = cfg.dotted("benchmark.models",
                         ["universal", "topology", "family", "architecture",
                          "context", "hmm_arch", "hmm_arch_context"])
-    score_df = _build_score_table(cfg, feats, context, hits)
+
+    # Identify leakage: hard negatives whose exact sequence equals a gold
+    # positive's. These are unwinnable false positives that would distort both
+    # regimes (a sequence identical to a training positive scored as a negative).
+    gold_seqs = set(clean[clean["dataset_category"] == "gold"]["sequence"])
+    neg_df = clean[clean["dataset_category"] == "hard_negative"]
+    leak_ids = set(neg_df[neg_df["sequence"].isin(gold_seqs)]["protein_id"])
+    if leak_ids:
+        log.warning("Stage 9: excluding %d hard negative(s) identical to a gold "
+                    "sequence (label leakage): %s", len(leak_ids), sorted(leak_ids))
+        pd.DataFrame({"protein_id": sorted(leak_ids),
+                      "reason": "sequence identical to a gold positive"}).to_csv(
+            cfg.out("tables", "benchmark_excluded_leakage.tsv"), sep="\t", index=False)
+
+    score_df = _build_score_table(cfg, feats, context, hits, exclude_ids=leak_ids)
     n_pos = int(score_df["label"].sum())
     n_neg = int(len(score_df) - n_pos)
     warn_n = int(cfg.dotted("benchmark.validation.min_class_size_warn", 5))
@@ -256,13 +300,31 @@ def run(cfg: Config, feats: pd.DataFrame, context: pd.DataFrame | None,
                     "(< %d). Metrics are unstable; interpret with caution.",
                     n_pos, n_neg, warn_n)
 
+    # Context-only model is only meaningful if positives actually have context.
+    pos_ctx_cov = 0.0
+    if n_pos and "has_context" in score_df.columns:
+        pos_ctx_cov = float(score_df[score_df["label"] == 1]["has_context"].mean())
+
     naive = _evaluate_models(score_df, models, cfg)
+    # Guard H2: if positives have ~no genomic context, the context-only AUC is an
+    # artifact (it ranks the few annotated negatives). Mark it not-evaluable
+    # instead of reporting a misleading sub-random number.
+    if pos_ctx_cov < 0.2 and "context" in set(naive["model"]):
+        mask = naive["model"] == "context"
+        for col in ["roc_auc", "roc_auc_ci_low", "roc_auc_ci_high", "pr_auc",
+                    "topk_recall", "precision", "recall", "specificity", "f1"]:
+            if col in naive.columns:
+                naive.loc[mask, col] = float("nan")
+        naive.loc[mask, "note"] = (f"not evaluable: context present for only "
+                                   f"{pos_ctx_cov:.0%} of positives")
+        log.info("Stage 9: context-only model marked not-evaluable "
+                 "(context covers %.0f%% of positives).", pos_ctx_cov * 100)
     naive.to_csv(cfg.out("tables", "benchmark_metrics.tsv"), sep="\t", index=False)
     score_df.to_csv(cfg.out("tables", "benchmark_scores.tsv"), sep="\t", index=False)
 
     lofo = pd.DataFrame()
     if cfg.dotted("benchmark.validation.do_leave_one_family_out", True):
-        lofo = leave_one_family_out_universal(cfg, clean, feats)
+        lofo = leave_one_family_out_universal(cfg, clean, feats, exclude_ids=leak_ids)
         lofo.to_csv(cfg.out("tables", "benchmark_lofo_universal.tsv"), sep="\t", index=False)
         if not lofo.empty and lofo["recall"].notna().any():
             mean_recall = lofo["recall"].dropna().mean()

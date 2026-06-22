@@ -75,6 +75,7 @@ def run(cfg: Config) -> Path:
     motif = _read(cfg, "motif_conservation_summary.tsv")
     fp_fn = _read(cfg, "false_pos_neg.tsv")
     ranking = _read(cfg, "candidate_ranking.tsv")
+    leakage = _read(cfg, "benchmark_excluded_leakage.tsv")
 
     cat_counts = (clean["dataset_category"].value_counts().to_dict()
                   if not clean.empty else {})
@@ -118,13 +119,23 @@ def run(cfg: Config) -> Path:
             "universal model.")
     if fam_roc == fam_roc and uni_roc == uni_roc and fam_roc > uni_roc:
         conclusions.append(
-            "Family-specific HMMs improved recovery of related holins relative to the universal "
-            "model but, by construction, cannot identify distant holin families — consistent with "
-            "extensive sequence diversity and a fragmented sequence space.")
-    if full_roc == full_roc and hmmarch_roc == hmmarch_roc and full_roc >= hmmarch_roc:
+            "On naive (circular) metrics, family-specific HMMs scored higher than the universal "
+            "model on related holins but, by construction, cannot identify distant holin families — "
+            "consistent with extensive sequence diversity and a fragmented sequence space. No "
+            "leakage-free family-model estimate is available, so this is an upper bound.")
+    # Was the context-only model actually evaluable (positives had context)?
+    ctx_note = str(_get(bench, "model", "context", "note", ""))
+    context_evaluable = "not evaluable" not in ctx_note.lower()
+    if not context_evaluable:
+        conclusions.append(
+            "Genomic context could not be benchmarked as a standalone signal because the curated "
+            "positives lacked genome-neighborhood annotations; context was therefore used only as a "
+            "supportive tie-breaker for candidates, not evaluated head-to-head.")
+    elif (full_roc == full_roc and hmmarch_roc == hmmarch_roc
+          and full_roc > hmmarch_roc + 0.01):
         conclusions.append(
             "Combining HMM evidence with transmembrane topology and lysis-cassette context "
-            "improved (or matched) candidate prioritization compared with sequence-only models.")
+            "improved candidate prioritization compared with sequence-only models.")
     if "hydrophobic" in uni_interp.lower():
         conclusions.append(
             "No universal linear amino-acid motif was detected across the curated holin set; "
@@ -159,6 +170,11 @@ def run(cfg: Config) -> Path:
     if not flags.empty:
         md.append(_md_table(flags.groupby("flag").size().reset_index(name="count"),
                             max_rows=30))
+    if not leakage.empty:
+        md.append(f"\n**Benchmark leakage control:** {len(leakage)} hard negative(s) whose sequence "
+                  "is identical to a gold positive were excluded from the benchmark to avoid "
+                  "label leakage:\n")
+        md.append(_md_table(leakage, max_rows=20))
 
     md.append("## 3. Gold positive curation summary\n")
     md.append(f"Curated gold positives: **{n_gold}**. "
@@ -184,9 +200,15 @@ def run(cfg: Config) -> Path:
         md.append(f"\nMean held-out recall of the universal HMM: **{lofo_recall:.2f}**.\n")
 
     md.append("## 6. Topology-specific HMM performance\n")
+    md.append("> These are **naive (circular)** metrics — the topology HMMs were built from the same "
+              "gold positives they are scored against. No leakage-free estimate is available for "
+              "topology models in this run; treat the numbers as an upper bound.\n")
     md.append(_md_table(bench[bench["model"] == "topology"] if not bench.empty else bench))
 
     md.append("## 7. Family-specific HMM performance\n")
+    md.append("> Also **naive (circular)**: family HMMs are built from, and scored against, the same "
+              "gold positives. By construction a family HMM cannot recognize a holin family it was "
+              "not built from, so a high naive AUC does not imply generalization.\n")
     md.append(_md_table(bench[bench["model"] == "family"] if not bench.empty else bench))
     md.append("\nModel metadata:\n")
     md.append(_md_table(meta))

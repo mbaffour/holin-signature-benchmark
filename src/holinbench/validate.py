@@ -107,8 +107,13 @@ def run(cfg: Config) -> dict:
             "negative_residues": neg,
             "net_charge": net_charge(seq),
         })
-    metrics_df = pd.DataFrame(metrics)
-    clean = clean.merge(metrics_df, on="protein_id", how="left")
+    # Attach metrics positionally (NOT a merge on protein_id): the same
+    # protein_id can legitimately appear in two classes — exactly the cross-class
+    # duplicate the QC catches — and a key-merge would fan those rows out and
+    # silently inflate every downstream count.
+    metrics_df = pd.DataFrame(metrics, index=clean.index).drop(columns=["protein_id"])
+    clean = pd.concat([clean.reset_index(drop=True),
+                       metrics_df.reset_index(drop=True)], axis=1)
 
     flags_df = pd.DataFrame(flags, columns=["protein_id", "dataset_category", "flag", "detail"])
 

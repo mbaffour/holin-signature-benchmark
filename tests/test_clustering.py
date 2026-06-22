@@ -22,6 +22,18 @@ def test_greedy_cluster_threshold_monotonic():
     assert n_strict >= n_loose
 
 
+def test_coverage_gate_separates_prefix_from_parent():
+    parent = "MK" + "LLIVFAMWLLIVFAMWLLIVFAMWLLIVFAMW" + "KKDE"
+    prefix = parent[:18]  # identical over its own length, but covers <half of parent
+    ids = ["parent", "prefix"]
+    # With no coverage requirement, the prefix merges (identity over shorter == 1).
+    merged = clustering.greedy_cluster(ids, [parent, prefix], 0.9, coverage=0.0)
+    assert merged["parent"] == merged["prefix"]
+    # With a coverage gate, the prefix must NOT merge (low coverage of the parent).
+    gated = clustering.greedy_cluster(ids, [parent, prefix], 0.9, coverage=0.8)
+    assert gated["parent"] != gated["prefix"]
+
+
 def test_run_writes_assignments_and_fragmentation(toy_cfg):
     clusters = clustering.run(toy_cfg)
     assert "cluster_30" in clusters.columns

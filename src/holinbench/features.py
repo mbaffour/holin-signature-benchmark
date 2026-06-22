@@ -24,7 +24,10 @@ ENZYMATIC_STRUCTURAL_TERMS = [
 
 
 def _terminal_charge(seq: str, n: int) -> dict[str, int]:
-    nterm, cterm = seq[:n], seq[-n:] if len(seq) >= n else seq
+    # seq[-n:] already returns the whole string when len(seq) < n, so no branch
+    # is needed; for very short holins the N/C windows may overlap, which is the
+    # correct behavior for a sequence shorter than 2*n.
+    nterm, cterm = seq[:n], seq[-n:]
     np_ = sum(1 for c in nterm if c in POSITIVE_AA)
     nn = sum(1 for c in nterm if c in NEGATIVE_AA)
     cp = sum(1 for c in cterm if c in POSITIVE_AA)

@@ -74,7 +74,8 @@ def draw_cassette(genes: pd.DataFrame, candidate_id: str, terms: dict,
             head_width=0.5, head_length=min(abs(dx) * 0.4, span * 0.03),
             color=color, ec="black", lw=0.6))
         ax.text((g["start"] + g["end"]) / 2, 0.55,
-                g["product"][:18], ha="center", va="bottom", fontsize=6, rotation=20)
+                (str(g["product"]) if pd.notna(g["product"]) else "")[:18],
+                ha="center", va="bottom", fontsize=6, rotation=20)
         if is_cand:
             ax.text((g["start"] + g["end"]) / 2, -0.6, "★ candidate",
                     ha="center", va="top", fontsize=7, color=CLASS_COLORS["candidate"])

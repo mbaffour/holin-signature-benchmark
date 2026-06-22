@@ -240,8 +240,11 @@ def scan(cfg: Config, models: list[dict] | None = None,
                 hmm_to = getattr(aln, "hmm_to", 0) if aln else 0
                 mlen = hmm.M
                 tlen = lengths.get(target, 0) or 1
-                qcov = round((hmm_to - hmm_from + 1) / mlen, 3) if mlen else 0.0
-                tcov = round((ali_to - ali_from + 1) / tlen, 3) if tlen else 0.0
+                if aln is None:
+                    qcov = tcov = 0.0
+                else:
+                    qcov = round((hmm_to - hmm_from + 1) / mlen, 3) if mlen else 0.0
+                    tcov = round((ali_to - ali_from + 1) / tlen, 3) if tlen else 0.0
                 rows.append({
                     "protein_id": target, "dataset_category": cat.get(target, ""),
                     "model_id": m["model_id"], "model_type": m["model_type"],

@@ -24,19 +24,32 @@ _BUILTIN_MAX = 800  # all-pairs identity above this is slow; warn the user.
 
 
 # --------------------------------------------------------- identity ------------
-def _pairwise_identity(a: str, b: str, aligner) -> float:
-    """Fraction identical = identities / length of shorter sequence."""
+def _pairwise_identity(a: str, b: str, aligner) -> tuple[float, float]:
+    """Return (identity, coverage).
+
+    identity = identities / length of shorter sequence.
+    coverage = aligned residues (match+mismatch) / length of LONGER sequence.
+
+    The coverage term matters because a short sequence that is a prefix/subset of
+    a longer one can score identity 1.0 while covering only a fraction of the
+    longer (representative) sequence; without a coverage gate such pairs falsely
+    merge and inflate cluster connectivity (the project's headline metric).
+    """
     if not a or not b:
-        return 0.0
+        return 0.0, 0.0
     if a == b:
-        return 1.0
+        return 1.0, 1.0
     try:
-        aln = aligner.align(a, b)[0]
-        ident = aln.counts().identities
+        counts = aligner.align(a, b)[0].counts()
+        ident = counts.identities
+        aligned = counts.identities + counts.mismatches
     except Exception:
         # Fallback: k-mer Jaccard as a rough proxy if alignment fails.
-        return _kmer_identity(a, b)
-    return ident / min(len(a), len(b))
+        ji = _kmer_identity(a, b)
+        return ji, ji
+    identity = ident / min(len(a), len(b))
+    coverage = aligned / max(len(a), len(b))
+    return identity, coverage
 
 
 def _kmer_identity(a: str, b: str, k: int = 3) -> float:
@@ -57,8 +70,13 @@ def _make_aligner():
     return al
 
 
-def greedy_cluster(ids: list[str], seqs: list[str], threshold: float) -> dict[str, int]:
-    """Deterministic greedy clustering: longest-first representatives."""
+def greedy_cluster(ids: list[str], seqs: list[str], threshold: float,
+                   coverage: float = 0.0) -> dict[str, int]:
+    """Deterministic greedy clustering: longest-first representatives.
+
+    A sequence joins a cluster only if it meets BOTH the identity `threshold`
+    and the `coverage` fraction against the cluster representative.
+    """
     order = sorted(range(len(ids)), key=lambda i: (-len(seqs[i]), ids[i]))
     aligner = _make_aligner()
     reps: list[int] = []
@@ -66,7 +84,8 @@ def greedy_cluster(ids: list[str], seqs: list[str], threshold: float) -> dict[st
     for i in order:
         placed = False
         for cid, rep in enumerate(reps):
-            if _pairwise_identity(seqs[i], seqs[rep], aligner) >= threshold:
+            identity, cov = _pairwise_identity(seqs[i], seqs[rep], aligner)
+            if identity >= threshold and cov >= coverage:
                 assignment[ids[i]] = cid
                 placed = True
                 break
@@ -106,7 +125,8 @@ def cluster_records(records: list[tuple[str, str]], threshold: float,
     if chosen == "builtin" and len(ids) > _BUILTIN_MAX:
         log.warning("Builtin clusterer on %d sequences may be slow (all-pairs).",
                     len(ids))
-    return greedy_cluster(ids, seqs, threshold)
+    coverage = float(cfg.dotted("clustering.coverage", 0.0)) if cfg is not None else 0.0
+    return greedy_cluster(ids, seqs, threshold, coverage=coverage)
 
 
 # --------------------------------------------------------- driver --------------

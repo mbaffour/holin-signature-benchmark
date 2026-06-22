@@ -55,6 +55,7 @@ def run(cfg: Config, features: pd.DataFrame | None = None) -> pd.DataFrame:
     win_genes = int(ccfg.get("window_genes", 5))
     win_bp = int(ccfg.get("window_bp", 5000))
     near_genes = int(ccfg.get("endolysin_near_genes", 3))
+    spanin_near_genes = int(ccfg.get("spanin_near_genes", win_genes))
     w = ccfg.get("weights", {})
 
     if ctx.empty:
@@ -88,20 +89,17 @@ def run(cfg: Config, features: pd.DataFrame | None = None) -> pd.DataFrame:
             neigh = [j for j in range(len(genes)) if j != i and within_window(j)]
             neigh_cats = set().union(*[cat_sets[j] for j in neigh]) if neigh else set()
 
-            def is_endolysin(o):
-                j = genes.index[genes["gene_id"] == o["gene_id"]]
-                return bool({"endolysin", "sar_endolysin"} & cat_sets[int(j[0])])
-
-            # distances
+            # distances. `genes` was reset_index'd, so each row's positional
+            # index == its label (o.name); use that to look up its category set
+            # rather than re-matching on gene_id (which is non-unique in messy
+            # GFF/TSV exports and would mis-score neighbours).
             d_endo_g, d_endo_bp, endo_same = _gene_distance(
-                genes, i, lambda o: bool({"endolysin", "sar_endolysin"} &
-                                         cat_sets[int(genes.index[genes["gene_id"] == o["gene_id"]][0])]))
+                genes, i, lambda o: bool({"endolysin", "sar_endolysin"} & cat_sets[int(o.name)]))
             d_span_g, _, _ = _gene_distance(
-                genes, i, lambda o: bool({"spanin"} &
-                                         cat_sets[int(genes.index[genes["gene_id"] == o["gene_id"]][0])]))
+                genes, i, lambda o: bool({"spanin"} & cat_sets[int(o.name)]))
 
             near_endolysin = d_endo_g is not None and d_endo_g <= near_genes
-            near_spanin = d_span_g is not None and d_span_g <= win_genes
+            near_spanin = d_span_g is not None and d_span_g <= spanin_near_genes
             near_sar = "sar_endolysin" in neigh_cats
             isolated = not ({"endolysin", "sar_endolysin", "spanin", "antiholin", "holin"} & neigh_cats)
 

@@ -134,10 +134,22 @@ def run(cfg: Config, features: pd.DataFrame,
         for _, r in context.iterrows():
             ctx_lookup[r["protein_id"]] = r
 
+    ranking_cols = ["protein_id", "dataset_category", "best_hmm_model", "best_hmm_evalue",
+                    "best_hmm_bitscore", "universal_hmm_hit", "topology_hmm_hit",
+                    "family_hmm_hit", "length", "tmd_count", "hydrophobic_fraction",
+                    "near_endolysin", "near_spanin", "context_score", "architecture_score",
+                    "hmm_score", "final_holin_score", "confidence_category", "explanation"]
+
     rows = []
     feats = features
     if restrict_categories:
         feats = feats[feats["dataset_category"].isin(restrict_categories)]
+
+    if feats.empty:
+        empty = pd.DataFrame(columns=ranking_cols)
+        empty.to_csv(cfg.out("tables", "candidate_ranking.tsv"), sep="\t", index=False)
+        log.warning("Stage 8: no proteins to score (empty/over-filtered input).")
+        return empty
 
     for _, frow in feats.iterrows():
         pid = frow["protein_id"]
@@ -149,14 +161,26 @@ def run(cfg: Config, features: pd.DataFrame,
         hmm_val, hmm_info, hmm_reasons = hmm_score(phits, cfg)
 
         cinfo = ctx_lookup.get(pid)
-        raw_ctx = float(cinfo["context_score"]) if cinfo is not None else 0.0
+        has_ctx = cinfo is not None
+        raw_ctx = float(cinfo["context_score"]) if has_ctx else 0.0
         ctx_val = context_norm(raw_ctx)
-        ctx_reason = (cinfo["context_explanation"] if cinfo is not None
+        ctx_reason = (cinfo["context_explanation"] if has_ctx
                       else "no genomic context supplied")
 
-        final = (weights.get("hmm", 0.45) * hmm_val +
-                 weights.get("architecture", 0.30) * arch +
-                 weights.get("context", 0.25) * ctx_val)
+        w_hmm = weights.get("hmm", 0.45)
+        w_arch = weights.get("architecture", 0.30)
+        w_ctx = weights.get("context", 0.25)
+        if has_ctx:
+            final = w_hmm * hmm_val + w_arch * arch + w_ctx * ctx_val
+            ctx_expl = f"Context[{ctx_val:.2f} from raw {raw_ctx:+.1f}]: {ctx_reason}."
+        else:
+            # No context row for this protein: drop the context term and
+            # renormalize over the remaining evidence, so "no data" neither
+            # rewards (a flat 0.5) nor penalizes the candidate relative to one
+            # whose context was actually measured.
+            denom = (w_hmm + w_arch) or 1.0
+            final = (w_hmm * hmm_val + w_arch * arch) / denom
+            ctx_expl = f"Context[n/a]: {ctx_reason} (context weight renormalized out)."
         final = round(max(0.0, min(1.0, final)), 4)
         category = confidence_category(final, cfg)
 
@@ -164,7 +188,7 @@ def run(cfg: Config, features: pd.DataFrame,
             f"score={final:.2f} ({category}). "
             f"HMM[{hmm_val:.2f}]: {'; '.join(hmm_reasons)}. "
             f"Architecture[{arch:.2f}]: {'; '.join(arch_reasons)}. "
-            f"Context[{ctx_val:.2f} from raw {raw_ctx:+.1f}]: {ctx_reason}."
+            f"{ctx_expl}"
         )
 
         rows.append({
