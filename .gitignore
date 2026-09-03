@@ -29,3 +29,7 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+
+# Private/real inputs — never commit
+config/config.real.yaml
+data/real/
